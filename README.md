@@ -1,3 +1,11 @@
+# FORK
+
+This a fork of [Genmoai's txt2video model](https://github.com/genmoai/models) optimized to run on a single 48GB GPU Node (ex. A6000, RTX 6000).
+
+Work so far whas been fixing some (bugs)[https://huggingface.co/genmo/mochi-1-preview/discussions/3] and setting num_workers=1 for [ray](https://pypi.org/project/ray/) which controls multi-gpu workers.
+
+Original readme below:
+
 # Mochi 1
 [Blog](https://www.genmo.ai/blog) | [Hugging Face](https://huggingface.co/genmo/mochi-1-preview) | [Playground](https://www.genmo.ai/play) | [Careers](https://jobs.ashbyhq.com/genmo)
 

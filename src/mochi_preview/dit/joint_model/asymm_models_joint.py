@@ -49,6 +49,7 @@ class AsymmetricAttention(nn.Module):
         attend_to_padding: bool = False,
         softmax_scale: Optional[float] = None,
         device: Optional[torch.device] = None,
+        **block_kwargs # ignore for now
     ):
         super().__init__()
         self.dim_x = dim_x

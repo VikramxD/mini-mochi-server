@@ -44,7 +44,7 @@ with gr.Blocks() as demo:
 @click.option("--model_dir", required=True, help="Path to the model directory.")
 def launch(model_dir):
     set_model_path(model_dir)
-    demo.launch()
+    demo.launch(server_name="0.0.0.0")
 
 if __name__ == "__main__":
     launch()

@@ -31,7 +31,7 @@ def load_model():
         MODEL_CHECKPOINT_PATH = f"{MOCHI_DIR}/dit.safetensors"
 
         model = MochiWrapper(
-            num_workers=8,
+            num_workers=1,  # set to one for a single GPU instance, should parameterize this, still requires 48GB VRAM
             vae_stats_path=f"{MOCHI_DIR}/vae_stats.json",
             vae_checkpoint_path=VAE_CHECKPOINT_PATH,
             dit_config_path=MODEL_CONFIG_PATH,

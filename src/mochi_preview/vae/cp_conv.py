@@ -64,6 +64,7 @@ def gather_all_frames(x: torch.Tensor) -> torch.Tensor:
         output: Tensor of shape (B, C, T_total, H, W)
     """
     cp_rank, cp_size = cp.get_cp_rank_size()
+    print(f"cp_rank {cp_rank}, cp_size {cp_size}")
     cp_group = cp.get_cp_group()
 
     # Ensure the tensor is contiguous for collective operations

@@ -1,0 +1,1 @@
+python3 -m mochi_preview.gradio_ui --model_dir ../genmoai/models
