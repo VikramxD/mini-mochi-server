@@ -41,11 +41,12 @@ MAX_T5_TOKEN_LENGTH = 256
 
 @contextmanager
 def move_to_device(model: nn.Module, device="cuda", dtype=torch.bfloat16):
-    print(f"moving {type(model)} to {device}")
+    print(f"moving {type(model).__name__} to {device}")
     model.to(device, dtype=dtype)
     yield
-    print(f"moving {model} to back to cpu")
+    print(f"moving {type(model).__name__} to back to cpu")
     model.to("cpu")
+
 
 class T5_Tokenizer:
     """Wrapper around Hugging Face tokenizer for T5
@@ -238,7 +239,6 @@ class T2VSynthMochiModel:
             )
             self.t5_enc.eval()
             self.t5_enc.to("cpu")
-            print(f"t5_enc device: {next(self.t5_enc.parameters()).device}, {next(self.t5_enc.parameters()).dtype}")
 
         with t("load_vae"):
             self.decoder = Decoder(
@@ -260,7 +260,6 @@ class T2VSynthMochiModel:
             self.decoder.load_state_dict(decoder_sd, strict=True)
             self.decoder.eval().to(self.device, dtype=self.dtype)
             self.decoder.to("cpu")
-            print(f"decoder device: {next(self.decoder.parameters()).device}, {next(self.decoder.parameters()).dtype}")
 
         with t("construct_dit"):
             with open(dit_config_path, "r") as f:
@@ -384,6 +383,16 @@ class T2VSynthMochiModel:
         w = args["width"]
         h = args["height"]
         t = args["num_frames"]
+
+        # must be (t-1) % 6 == 0
+        required_divisibility = 6
+        remainder = t % required_divisibility
+        if remainder < (required_divisibility//2):
+            t = t - remainder + 1
+        else:
+            t = t + (required_divisibility//2 - remainder) + 1
+        print(f"using frame_count {t}")
+
         batch_cfg = args["mochi_args"]["batch_cfg"]
         sample_steps = args["mochi_args"]["num_inference_steps"]
         cfg_schedule = args["mochi_args"].get("cfg_schedule")

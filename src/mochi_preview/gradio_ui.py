@@ -15,11 +15,11 @@ with gr.Blocks() as demo:
     with gr.Row():
         width = gr.Number(label="Width", value=848, precision=0)
         height = gr.Number(label="Height", value=480, precision=0)
-        num_frames = gr.Number(label="Number of Frames", value=163, precision=0)
+        num_frames = gr.Number(label="Number of Frames", value=73, precision=0)
     with gr.Row():
         cfg_scale = gr.Number(label="CFG Scale", value=4.5)
         num_inference_steps = gr.Number(
-            label="Number of Inference Steps", value=200, precision=0
+            label="Number of Inference Steps", value=100, precision=0
         )
     btn = gr.Button("Generate Video")
     output = gr.Video()
