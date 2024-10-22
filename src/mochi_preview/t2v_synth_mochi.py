@@ -3,6 +3,7 @@ import os
 import random
 from functools import partial
 from typing import Dict, List
+from contextlib import contextmanager
 
 from safetensors.torch import load_file
 import numpy as np
@@ -37,6 +38,14 @@ from mochi_preview.vae.model import Decoder
 
 T5_MODEL = "google/t5-v1_1-xxl"
 MAX_T5_TOKEN_LENGTH = 256
+
+@contextmanager
+def move_to_device(model: nn.Module, device="cuda", dtype=torch.bfloat16):
+    print(f"moving {type(model)} to {device}")
+    model.to(device, dtype=dtype)
+    yield
+    print(f"moving {model} to back to cpu")
+    model.to("cpu")
 
 class T5_Tokenizer:
     """Wrapper around Hugging Face tokenizer for T5
@@ -194,7 +203,7 @@ class T2VSynthMochiModel:
         self.world_size = world_size
         t = Timer()
         self.device = torch.device(device_id)
-        if world_size > 1: # should not hit this with smol edition
+        if world_size > 1:
             os.environ["MASTER_ADDR"] = "127.0.0.1"
             os.environ["MASTER_PORT"] = "29500"
             with t("init_process_group"):
@@ -282,7 +291,7 @@ class T2VSynthMochiModel:
                     ),
                 )
                 if world_size > 1 
-                else model.to(self.device, dtype=self.dtype) # can leave
+                else model.to(device="cpu", dtype=self.dtype)
             )
             self.dit.eval()
             if os.environ.get("COMPILE_DIT") == "1":
@@ -330,16 +339,13 @@ class T2VSynthMochiModel:
         y_mask = [caption_attention_mask_t5]
         y_feat = []
 
-        print("moving T5 enc to GPU")
-        self.t5_enc.to(self.device, dtype=self.dtype)
-        with torch.autocast("cuda", dtype=self.dtype):
-            y_feat.append(
-                self.t5_enc(
-                    caption_input_ids_t5, caption_attention_mask_t5
-                ).last_hidden_state.detach()
-            )
-        print("moving T5 enc back to CPU")
-        self.t5_enc.to("cpu")
+        with move_to_device(self.t5_enc):
+            with torch.autocast("cuda", dtype=self.dtype):
+                y_feat.append(
+                    self.t5_enc(
+                        caption_input_ids_t5, caption_attention_mask_t5
+                    ).last_hidden_state.detach()
+                )
         torch.cuda.empty_cache()
 
         assert tuple(y_feat[-1].shape) == (B, MAX_T5_TOKEN_LENGTH, 4096)
@@ -440,37 +446,34 @@ class T2VSynthMochiModel:
             assert out_cond.shape == out_uncond.shape
             return out_uncond + cfg_scale * (out_cond - out_uncond), out_cond
 
-        print("moving dit to gpu")
-        self.dit.to(device=self.device, dtype=self.dtype)
-        for i in range(0, sample_steps):
-            if not sigma_schedule:
-                raise NotImplementedError("sigma_schedule is required. Specifying shift has not been wired up to the CLI or UI.")
-                sigma = 1 - i / sample_steps
-                sigma_next = 1 - (i + 1) / sample_steps
+        with move_to_device(self.dit):
+            for i in range(0, sample_steps):
+                if not sigma_schedule:
+                    raise NotImplementedError("sigma_schedule is required. Specifying shift has not been wired up to the CLI or UI.")
+                    sigma = 1 - i / sample_steps
+                    sigma_next = 1 - (i + 1) / sample_steps
 
-                sigma = shift_sigma(sigma, shift=shift)
-                sigma_next = shift_sigma(sigma_next, shift=shift)
-                dsigma = sigma - sigma_next
-            else:
-                sigma = sigma_schedule[i]
-                dsigma = sigma - sigma_schedule[i + 1]
+                    sigma = shift_sigma(sigma, shift=shift)
+                    sigma_next = shift_sigma(sigma_next, shift=shift)
+                    dsigma = sigma - sigma_next
+                else:
+                    sigma = sigma_schedule[i]
+                    dsigma = sigma - sigma_schedule[i + 1]
 
-            # `pred` estimates `z_0 - eps`.
-            pred, output_cond = model_fn(
-                z=z,
-                sigma=torch.full(
-                    [B] if not batch_cfg else [B * 2], sigma, device=z.device
-                ),
-                cfg_scale=cfg_schedule[i],
-            )
-            pred = pred.to(z)
-            output_cond = output_cond.to(z)
+                # `pred` estimates `z_0 - eps`.
+                pred, output_cond = model_fn(
+                    z=z,
+                    sigma=torch.full(
+                        [B] if not batch_cfg else [B * 2], sigma, device=z.device
+                    ),
+                    cfg_scale=cfg_schedule[i],
+                )
+                pred = pred.to(z)
+                output_cond = output_cond.to(z)
 
-            if stream_results:
-                yield i / sample_steps, None, False
-            z = z + dsigma * pred
-        print("moving dit back to cpu")
-        self.dit.to(device="cpu")
+                if stream_results:
+                    yield i / sample_steps, None, False
+                z = z + dsigma * pred
         torch.cuda.empty_cache()
 
         cp_rank, cp_size = cp.get_cp_rank_size()
@@ -479,14 +482,13 @@ class T2VSynthMochiModel:
         z = z.tensor_split(cp_size, dim=2)[cp_rank]  # split along temporal dim
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
 
-        self.decoder.to(self.device, dtype=self.dtype)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            samples = self.decoder(samples)
-        self.decoder.to("cpu")
+        with move_to_device(self.decoder):
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                samples = self.decoder(samples)
 
-        print(f"frames finished, samples.shape: {samples.shape}")
         if self.world_size > 1:
             samples = cp_conv.gather_all_frames(samples)
+        print(f"frames finished, samples.shape: {samples.shape}")
 
         samples = samples.float()
         samples = (samples + 1.0) / 2.0
