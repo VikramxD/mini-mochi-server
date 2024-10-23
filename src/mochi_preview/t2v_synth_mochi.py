@@ -4,6 +4,7 @@ import random
 from functools import partial
 from typing import Dict, List
 from contextlib import contextmanager
+from pynvml_utils import nvidia_smi
 
 from safetensors.torch import load_file
 import numpy as np
@@ -39,6 +40,11 @@ from mochi_preview.vae.model import Decoder
 T5_MODEL = "google/t5-v1_1-xxl"
 MAX_T5_TOKEN_LENGTH = 256
 
+def print_gpu_use(prefix=""):
+    nvsmi = nvidia_smi.getInstance()
+    result = nvsmi.DeviceQuery('memory.used')
+    print(f"{prefix}GPU RAM Used: {result['gpu'][0]['fb_memory_usage']['used']/1024:.2f} GB")
+
 @contextmanager
 def move_to_device(model: nn.Module, device="cuda", dtype=torch.bfloat16):
     print(f"moving {type(model).__name__} to {device}")
@@ -46,6 +52,7 @@ def move_to_device(model: nn.Module, device="cuda", dtype=torch.bfloat16):
     yield
     print(f"moving {type(model).__name__} to back to cpu")
     model.to("cpu")
+    torch.cuda.empty_cache()
 
 
 class T5_Tokenizer:
@@ -338,6 +345,7 @@ class T2VSynthMochiModel:
         y_mask = [caption_attention_mask_t5]
         y_feat = []
 
+        print_gpu_use("starting t5 enc ")
         with move_to_device(self.t5_enc):
             with torch.autocast("cuda", dtype=self.dtype):
                 y_feat.append(
@@ -345,7 +353,6 @@ class T2VSynthMochiModel:
                         caption_input_ids_t5, caption_attention_mask_t5
                     ).last_hidden_state.detach()
                 )
-        torch.cuda.empty_cache()
 
         assert tuple(y_feat[-1].shape) == (B, MAX_T5_TOKEN_LENGTH, 4096)
         return dict(y_mask=y_mask, y_feat=y_feat)
@@ -391,7 +398,7 @@ class T2VSynthMochiModel:
             t = t - remainder + 1
         else:
             t = t + (required_divisibility//2 - remainder) + 1
-        print(f"using frame_count {t}")
+        print(f"using frame_count {t} to match temporal attn")
 
         batch_cfg = args["mochi_args"]["batch_cfg"]
         sample_steps = args["mochi_args"]["num_inference_steps"]
@@ -404,7 +411,6 @@ class T2VSynthMochiModel:
             assert (
                 len(sigma_schedule) == sample_steps + 1
             ), f"sigma_schedule must have length {sample_steps + 1}, got {len(sigma_schedule)}"
-        print(f"t: {t}, t-1 {t-1}")
         assert (t - 1) % 6 == 0, f"t - 1 must be divisible by 6, got {t - 1}"
 
         if batch_cfg:
@@ -455,6 +461,7 @@ class T2VSynthMochiModel:
             assert out_cond.shape == out_uncond.shape
             return out_uncond + cfg_scale * (out_cond - out_uncond), out_cond
 
+        print_gpu_use("moving to dit process")
         with move_to_device(self.dit):
             for i in range(0, sample_steps):
                 if not sigma_schedule:
@@ -483,7 +490,6 @@ class T2VSynthMochiModel:
                 if stream_results:
                     yield i / sample_steps, None, False
                 z = z + dsigma * pred
-        torch.cuda.empty_cache()
 
         cp_rank, cp_size = cp.get_cp_rank_size()
         if batch_cfg:
@@ -491,13 +497,15 @@ class T2VSynthMochiModel:
         z = z.tensor_split(cp_size, dim=2)[cp_rank]  # split along temporal dim
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
 
+        print_gpu_use("moving to decoder process ")
         with move_to_device(self.decoder):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 samples = self.decoder(samples)
 
         if self.world_size > 1:
             samples = cp_conv.gather_all_frames(samples)
-        print(f"frames finished, samples.shape: {samples.shape}")
+
+        print_gpu_use(f"frames finished, samples.shape: {samples.shape} ")
 
         samples = samples.float()
         samples = (samples + 1.0) / 2.0

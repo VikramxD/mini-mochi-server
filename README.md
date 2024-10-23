@@ -1,20 +1,26 @@
 # FORK
 
-This a fork of [Genmoai's txt2video model](https://github.com/genmoai/models) optimized to run on a single GPU Node.
+This a **work in progress** fork of [Genmoai's txt2video model](https://github.com/genmoai/models) optimized to run on a *single GPU Node* with reduced VRAM.
 
-Work so far whas been fixing some (bugs)[https://huggingface.co/genmo/mochi-1-preview/discussions/3] and setting num_workers=1 for [ray](https://pypi.org/project/ray/) which controls multi-gpu workers.
+It is quite capable with 48GB, but it should be to run with a single 24GB GPU now.
 
-### <24GB
+### For 24GB VRAM enjoyers
 
-Do not exceed 61 frames.  VRAM use mostly scales with frame count.  Using lower resolution might help?
+Do not exceed 61 frames and try 640x480.  VRAM use mostly scales with frame count and resolution. Inference steps shouldn't change VRAM use, but time taken to create a video scales with steps.  100 steps seems ok and will likely take 15-25 minutes.  Original source used 200 steps, but this will take about twice as long.
 
-Windows not tested, but it might work. 
+Windows not yet tested, but it probably can work?  ¯\\_(ツ)_/¯
+
+If your system is already using VRAM for running a desktop you may need to lower settings further. 
 
 ### Technique
 
-Mostly just shifting the vae, te, etc back and forth to cpu when not needed and using bfloat16 everywhere.  A few other bug fixes included.
+Mostly just shifting the vae, te, dit, etc. back and forth to cpu when not needed and using bfloat16 everywhere.  This may require significant system RAM (~64GB) or may be extra slow if it has to revert to using pagefile if system RAM is <=32G since T5 and the DIT are still fairly large.  Time to move the models back and forth is fairly small in relation to the inference time spent in the DIT steps.
 
-**Original readme below:**
+### Next up, if I have some spare time to toy more:
+
+Further optimization... Maybe bitsandbytes NF4.  That might bring it down to 16GB or less, assuming it doesn't destroy output quality.  May try to see if I can inject a first frame image to make it do img2video. 
+
+# **Original readme below:**
 
 # Mochi 1
 [Blog](https://www.genmo.ai/blog) | [Hugging Face](https://huggingface.co/genmo/mochi-1-preview) | [Playground](https://www.genmo.ai/play) | [Careers](https://jobs.ashbyhq.com/genmo)
