@@ -1,4 +1,5 @@
 from typing import Callable, List, Optional, Tuple, Union
+import logging
 
 import torch
 import torch.nn as nn
@@ -650,6 +651,7 @@ class Decoder(nn.Module):
                T + 1 = (t - 1) * 4.
                H = h * 16, W = w * 16.
         """
+        logging.info(f"decoder in {x.shape}")
         for block in self.blocks:
             x = block(x)
 

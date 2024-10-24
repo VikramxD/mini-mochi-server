@@ -2,6 +2,10 @@ import json
 import os
 import tempfile
 import time
+import logging
+import csv
+from datetime import datetime
+from multiprocessing import Process
 
 import click
 import numpy as np
@@ -9,12 +13,34 @@ import ray
 from einops import rearrange
 from PIL import Image
 from tqdm import tqdm
+from pynvml_utils import nvidia_smi
 
 from mochi_preview.handler import MochiWrapper
 
 model = None
 model_path = None
 
+def config_logging(timestamp):
+    os.makedirs("logs", exist_ok=True)
+    logging.basicConfig(filename=f"logs/{timestamp}_steps.log", level=logging.INFO, 
+                    format='%(asctime)s,%(message)s', datefmt='%Y-%m-%d %H:%M:%S')
+
+def log_gpu_memory(timestamp):
+    nvsmi = nvidia_smi.getInstance()
+    os.makedirs("logs", exist_ok=True)
+    filename = f"logs/{timestamp}_memory_usage"
+    
+    with open(filename, 'w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Timestamp", "Memory Usage (GB)"])
+        
+        while True:
+            result = nvsmi.DeviceQuery('memory.used')
+            memory = f"{result['gpu'][0]['fb_memory_usage']['used']/1024:.3f}"
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            writer.writerow([timestamp, memory])
+            file.flush()  # Ensure data is written t
+            time.sleep(1)
 
 def set_model_path(path):
     global model_path
@@ -65,64 +91,72 @@ def generate_video(
     cfg_scale,
     num_inference_steps,
 ):
-    load_model()
+    log_timestamp = datetime.now().strftime('%Y-%m-%d_%H_%M_%S')
+    try:
+        memory_process = Process(target=log_gpu_memory, args=(log_timestamp,))
+        memory_process.start()
+        config_logging(log_timestamp)
+        load_model()
 
-    # sigma_schedule should be a list of floats of length (num_inference_steps + 1),
-    # such that sigma_schedule[0] == 1.0 and sigma_schedule[-1] == 0.0 and monotonically decreasing.
-    sigma_schedule = linear_quadratic_schedule(num_inference_steps, 0.025)
+        # sigma_schedule should be a list of floats of length (num_inference_steps + 1),
+        # such that sigma_schedule[0] == 1.0 and sigma_schedule[-1] == 0.0 and monotonically decreasing.
+        sigma_schedule = linear_quadratic_schedule(num_inference_steps, 0.025)
 
-    # cfg_schedule should be a list of floats of length num_inference_steps.
-    # For simplicity, we just use the same cfg scale at all timesteps,
-    # but more optimal schedules may use varying cfg, e.g:
-    # [5.0] * (num_inference_steps // 2) + [4.5] * (num_inference_steps // 2)
-    cfg_schedule = [cfg_scale] * num_inference_steps
+        # cfg_schedule should be a list of floats of length num_inference_steps.
+        # For simplicity, we just use the same cfg scale at all timesteps,
+        # but more optimal schedules may use varying cfg, e.g:
+        # [5.0] * (num_inference_steps // 2) + [4.5] * (num_inference_steps // 2)
+        cfg_schedule = [cfg_scale] * num_inference_steps
 
-    args = {
-        "height": height,
-        "width": width,
-        "num_frames": num_frames,
-        "mochi_args": {
-            "sigma_schedule": sigma_schedule,
-            "cfg_schedule": cfg_schedule,
-            "num_inference_steps": num_inference_steps,
-            "batch_cfg": True,
-        },
-        "prompt": [prompt],
-        "negative_prompt": [negative_prompt],
-        "seed": seed,
-    }
+        args = {
+            "height": height,
+            "width": width,
+            "num_frames": num_frames,
+            "mochi_args": {
+                "sigma_schedule": sigma_schedule,
+                "cfg_schedule": cfg_schedule,
+                "num_inference_steps": num_inference_steps,
+                "batch_cfg": True,
+            },
+            "prompt": [prompt],
+            "negative_prompt": [negative_prompt],
+            "seed": seed,
+        }
 
-    final_frames = None
-    for cur_progress, frames, finished in tqdm(model(args), total=num_inference_steps + 1):
-        final_frames = frames
+        final_frames = None
+        for cur_progress, frames, finished in tqdm(model(args), total=num_inference_steps + 1):
+            final_frames = frames
 
-    assert isinstance(final_frames, np.ndarray)
-    assert final_frames.dtype == np.float32
+        assert isinstance(final_frames, np.ndarray)
+        assert final_frames.dtype == np.float32
 
-    final_frames = rearrange(final_frames, "t b h w c -> b t h w c")
-    final_frames = final_frames[0]
+        final_frames = rearrange(final_frames, "t b h w c -> b t h w c")
+        final_frames = final_frames[0]
 
-    os.makedirs("outputs", exist_ok=True)
-    output_path = os.path.join("outputs", f"output_{int(time.time())}.mp4")
+        os.makedirs("outputs", exist_ok=True)
+        output_path = os.path.join("outputs", f"output_{int(time.time())}.mp4")
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        frame_paths = []
-        for i, frame in enumerate(final_frames):
-            frame = (frame * 255).astype(np.uint8)
-            frame_img = Image.fromarray(frame)
-            frame_path = os.path.join(tmpdir, f"frame_{i:04d}.png")
-            frame_img.save(frame_path)
-            frame_paths.append(frame_path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            frame_paths = []
+            for i, frame in enumerate(final_frames):
+                frame = (frame * 255).astype(np.uint8)
+                frame_img = Image.fromarray(frame)
+                frame_path = os.path.join(tmpdir, f"frame_{i:04d}.png")
+                frame_img.save(frame_path)
+                frame_paths.append(frame_path)
 
-        frame_pattern = os.path.join(tmpdir, "frame_%04d.png")
-        ffmpeg_cmd = f"ffmpeg -y -r 30 -i {frame_pattern} -vcodec libx264 -pix_fmt yuv420p {output_path}"
-        os.system(ffmpeg_cmd)
+            frame_pattern = os.path.join(tmpdir, "frame_%04d.png")
+            ffmpeg_cmd = f"ffmpeg -y -r 30 -i {frame_pattern} -vcodec libx264 -pix_fmt yuv420p {output_path}"
+            os.system(ffmpeg_cmd)
 
-        json_path = os.path.splitext(output_path)[0] + ".json"
-        with open(json_path, "w") as f:
-            json.dump(args, f, indent=4)
+            json_path = os.path.splitext(output_path)[0] + ".json"
+            with open(json_path, "w") as f:
+                json.dump(args, f, indent=4)
 
-    return output_path
+        return output_path
+    finally:
+        memory_process.terminate()
+        memory_process.join()
 
 
 @click.command()

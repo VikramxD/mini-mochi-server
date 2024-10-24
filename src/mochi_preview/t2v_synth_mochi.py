@@ -5,6 +5,7 @@ from functools import partial
 from typing import Dict, List
 from contextlib import contextmanager
 from pynvml_utils import nvidia_smi
+import logging
 
 from safetensors.torch import load_file
 import numpy as np
@@ -43,15 +44,17 @@ MAX_T5_TOKEN_LENGTH = 256
 def print_gpu_use(prefix=""):
     nvsmi = nvidia_smi.getInstance()
     result = nvsmi.DeviceQuery('memory.used')
-    print(f"{prefix}GPU RAM Used: {result['gpu'][0]['fb_memory_usage']['used']/1024:.2f} GB")
+    logging.info(f"{prefix} GPU RAM Used: {result['gpu'][0]['fb_memory_usage']['used']/1024:.2f} GB")
 
 @contextmanager
 def move_to_device(model: nn.Module, device="cuda", dtype=torch.bfloat16):
-    print(f"moving {type(model).__name__} to {device}")
+    logging.info(f"moving {type(model).__name__} to {device}")
     model.to(device, dtype=dtype)
+    logging.info(f"moved {type(model).__name__} to {device}")
     yield
-    print(f"moving {type(model).__name__} to back to cpu")
+    logging.info(f"moving {type(model).__name__} to back to cpu")
     model.to("cpu")
+    logging.info(f"moved {type(model).__name__} to back to cpu")
     torch.cuda.empty_cache()
 
 
@@ -345,7 +348,7 @@ class T2VSynthMochiModel:
         y_mask = [caption_attention_mask_t5]
         y_feat = []
 
-        print_gpu_use("starting t5 enc ")
+        print_gpu_use("starting t5 enc")
         with move_to_device(self.t5_enc):
             with torch.autocast("cuda", dtype=self.dtype):
                 y_feat.append(
@@ -393,11 +396,9 @@ class T2VSynthMochiModel:
 
         # must be (t-1) % 6 == 0
         required_divisibility = 6
-        remainder = t % required_divisibility
-        if remainder < (required_divisibility//2):
-            t = t - remainder + 1
-        else:
-            t = t + (required_divisibility//2 - remainder) + 1
+        t -= 1
+        t = required_divisibility * round(t/required_divisibility)
+        t += 1
         print(f"using frame_count {t} to match temporal attn")
 
         batch_cfg = args["mochi_args"]["batch_cfg"]
@@ -464,6 +465,7 @@ class T2VSynthMochiModel:
         print_gpu_use("moving to dit process")
         with move_to_device(self.dit):
             for i in range(0, sample_steps):
+                logging.info("dit iteration")
                 if not sigma_schedule:
                     raise NotImplementedError("sigma_schedule is required. Specifying shift has not been wired up to the CLI or UI.")
                     sigma = 1 - i / sample_steps
@@ -497,7 +499,7 @@ class T2VSynthMochiModel:
         z = z.tensor_split(cp_size, dim=2)[cp_rank]  # split along temporal dim
         samples = unnormalize_latents(z.float(), self.vae_mean, self.vae_std)
 
-        print_gpu_use("moving to decoder process ")
+        print_gpu_use("moving to decoder process")
         with move_to_device(self.decoder):
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 samples = self.decoder(samples)
@@ -505,7 +507,10 @@ class T2VSynthMochiModel:
         if self.world_size > 1:
             samples = cp_conv.gather_all_frames(samples)
 
-        print_gpu_use(f"frames finished, samples.shape: {samples.shape} ")
+        with open("samples.pt", "w") as f:
+            torch.save(samples, f)
+
+        print_gpu_use(f"frames finished, samples.shape: {samples.shape}")
 
         samples = samples.float()
         samples = (samples + 1.0) / 2.0
